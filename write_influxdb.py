@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+from datetime import datetime
+
 # NOTE(jkoelker) patch time to include monotonic
 import monotime  # noqa
 
@@ -159,6 +161,7 @@ class InfluxDB(object):
         self._last_sample = {}
         self._flush_thread = None
         self._raw_values = False
+        self._influxdb_version = '0.11'
 
     def _flush(self, timeout=-1, identifier=None, flush=False):
         if not self._buffer:
@@ -258,6 +261,7 @@ class InfluxDB(object):
 
     def write(self, sample):
         type_info = self._types.get(sample.type)
+        datas = []
 
         if type_info is None:
             msg = 'plugin: %s unknown type %s, not listed in %s'
@@ -274,6 +278,26 @@ class InfluxDB(object):
         for i, (ds_name, ds_type, min_val, max_val) in enumerate(type_info):
             value = sample.values[i]
             columns.append(ds_name)
+
+            if self._influxdb_version == '0.11':
+                if isinstance(sample.values[i], (float, int)):
+                    sample.values[i] = float(sample.values[i])
+
+                influxdb_data = {
+                    'measurement': '%s_%s' % (sample.plugin, ds_name),
+                    'tags': {
+                        'host': sample.host,
+                        'instance': sample.plugin_instance,
+                        'type': sample.type,
+                        'type_instance': sample.type_instance
+                    },
+                    'time':
+                        datetime.utcfromtimestamp(sample.time).isoformat('T')+'Z',
+                    'fields': {
+                        'value': float(sample.values[i])
+                    }
+                }
+                datas.append(influxdb_data)
 
             if (not isinstance(value, (float, int)) or
                     ds_type == "GAUGE" or
@@ -316,24 +340,33 @@ class InfluxDB(object):
                 new_value = value
 
             sample.values[i] = new_value
+            if self._influxdb_version == '0.11':
+                if isinstance(sample.values[i], (float, int)):
+                    sample.values[i] = float(sample.values[i])
+                datas[-1]['fields']['value'] = sample.values[i]
 
-        points.extend(sample.values)
-        columns.extend(('host', 'type'))
-        points.extend((sample.host, sample.type))
+        if self._influxdb_version == '0.11':
+            for data in datas:
+                self._queues[identifier].put(data)
+        else:
+            points.extend(sample.values)
+            columns.extend(('host', 'type'))
+            points.extend((sample.host, sample.type))
 
-        if sample.plugin_instance:
-            columns.append('plugin_instance')
-            points.append(sample.plugin_instance)
+            if sample.plugin_instance:
+                columns.append('plugin_instance')
+                points.append(sample.plugin_instance)
 
-        if sample.type_instance:
-            columns.append('type_instance')
-            points.append(sample.type_instance)
+            if sample.type_instance:
+                columns.append('type_instance')
+                points.append(sample.type_instance)
 
-        data = {'name': sample.plugin,
-                'columns': columns,
-                'points': [points]}
+            data = {'name': sample.plugin,
+                    'columns': columns,
+                    'points': [points]}
 
-        self._queues[identifier].put(data)
+            self._queues[identifier].put(data)
+
         self._flush()
 
 
